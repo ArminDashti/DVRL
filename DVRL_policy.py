@@ -1,4 +1,10 @@
-# From https://github.com/maximilianigl/DVRL/blob/master/code/pf_model.py
+'''
+Deep Variational Reinforcement Learning (2018) - DVRL
+Maximilian Igl, Luisa Zintgraf, Tuan Anh Le, Frank Wood, Shimon Whiteson
+https://arxiv.org/abs/1806.02426
+https://github.com/maximilianigl/DVRL/blob/master/code/policy.py
+'''
+
 
 import torch
 import torch.nn as nn
@@ -7,7 +13,6 @@ import torch.utils.data
 import torch.nn.functional as F
 from torch.autograd import Variable
 import aesmc.random_variable as rv
-
 import aesmc.state as st
 import aesmc.util as ae_util
 import aesmc.statistics as stats
@@ -20,7 +25,17 @@ from operator import mul
 from functools import reduce
 
 
-class DVRLPolicy(Policy):
+def num_killed_particles(A):
+    batch_size, num_particles = A.size()
+    output = np.zeros(batch_size)
+
+    for batch in range(batch_size):
+        output[batch] = np.count_nonzero(np.bincount(A[batch].numpy(), minlength=num_particles) == 0)
+
+    return output.astype(int)
+
+
+class DVRL_policy(policy):
     def __init__(self,
                  action_space,
                  nr_inputs,
@@ -72,7 +87,7 @@ class DVRLPolicy(Policy):
             phi_x_dim=phi_x_dim,
             nr_actions=action_shape,
             action_encoding=action_encoding,
-            observation_type=observation_type,
+            obs_type=obs_type,
             nr_inputs=nr_inputs,
             cnn_channels=cnn_channels,
             encoder_batch_norm=encoder_batch_norm
@@ -82,8 +97,7 @@ class DVRLPolicy(Policy):
         self.transition_network = VRNN_transition(
             h_dim=h_dim,
             z_dim=z_dim,
-            action_encoding=action_encoding
-            )
+            action_encoding=action_encoding)
 
         # Computes h_t=f(h_{t-1}, z_t, a_{t-1}, o_t)
         self.deterministic_transition_network = VRNN_deterministic_transition(
@@ -121,18 +135,19 @@ class DVRLPolicy(Policy):
 
         self.reset_parameters()
 
+
     def new_latent_state(self):
-        device = next(self.parameters()).device
-        initial_state = st.State(
-            h=torch.zeros(self.batch_size, self.num_particles, self.h_dim).to(device))
+        h = torch.zeros(self.bs, self.num_particles, self.h_dim).to(device)
+        init_state = st.State(h=h)
 
         log_weight = torch.zeros(self.batch_size, self.num_particles).to(device)
 
-        initial_state.log_weight = log_weight
+        init_state.log_weight = log_weight
 
-        return initial_state
+        return init_state
 
-    def vec_conditional_new_latent_state(self, latent_state, mask):
+
+    def vec_condition_new_latent(self, latent_state, mask):
         return latent_state.multiply_each(mask, only=['log_weight', 'h', 'z'])
 
 
@@ -158,71 +173,55 @@ class DVRLPolicy(Policy):
         if self.dist.__class__.__name__ == "DiagGaussian":
             self.dist.fc_mean.weight.data.mul_(0.01)
 
-    def sample_from(self, state_random_variable):
-        return state_random_variable.sample_reparameterized(
-            self.batch_size, self.num_particles
-        )
+
+    def sample_from(self, state_rand_var):
+        return state_rand_var.sample_reparameterized(self.batch_size, self.num_particles)
 
 
-    def encode(self, observation, reward, actions, previous_latent_state, predicted_times):
-        batch_size, *rest = observation.size()
-        ae_util.init(observation.is_cuda)
-        img_observation = observation.unsqueeze(0)
-        actions = actions.unsqueeze(0)
-        reward = reward.unsqueeze(0)
+    def encode(self, obs, reward, actions, pre_latent, pred_times):
+        bs, *rest = obs.size()
+        img_obs = obs.unsqueeze(0).contiguous()
+        actions = actions.unsqueeze(0).contiguous()
+        reward = reward.unsqueeze(0).contiguous()
         
-        observation_states = st.State(
-            all_x=img_observation.contiguous(),
-            all_a=actions.contiguous(),
-            r=reward.contiguous())
+        obs_states = st.State(all_x=img_obs, all_a=actions, r=reward)
 
-        old_log_weight = previous_latent_state.log_weight
+        old_log_weight = pre_latent.log_weight
 
-        observation_states = self.encoding_network(observation_states)
+        obs_states = self.encoding_network(obs_states) # Encode observation_states by a CNN network.
 
-        observation_states.unsequeeze_and_expand_all_(dim=2, size=self.num_particles)
+        obs_states.unsequeeze_and_expand_all_(dim=2, size=self.num_particles)
 
         ancestral_indices = sample_ancestral_index(old_log_weight)
 
-        num_killed_particles = list(tu.num_killed_particles(ancestral_indices.data.cpu()))
+        num_killed_particles = list(num_killed_particles(ancestral_indices.data.cpu()))
+        
         if self.resample:
-            previous_latent_state = previous_latent_state.resample(ancestral_indices)
+            previous_latent_state = prev_latent.resample(ancestral_indices)
         else:
             num_killed_particles = [0] * batch_size
 
         avg_num_killed_particles = sum(num_killed_particles)/len(num_killed_particles)
 
-        current_observation = observation_states.index_elements(0)
+        curr_obs = obs_states.index_elements(0)
+        
+        # Take prev latent and obs and calcualte dist, mean, std with 3 indivisual networks then feed rv.MultivariateIndependentNormal(mean=enc_mean_t, variance=enc_std_t) to rv.StateRandomVariable(z=z)
+        proposal_state_rand_var = self.proposal_network(prev_latent=prev_latent, obs_states=current_obs, time=0) 
 
-        proposal_state_random_variable = self.proposal_network(
-            previous_latent_state=previous_latent_state,
-            observation_states=current_observation,
-            time=0
-        )
-        latent_state = self.sample_from(proposal_state_random_variable)
+        latent = self.sample_from(proposal_state_rand_var)
 
-        latent_state = self.deterministic_transition_network(
-            previous_latent_state=previous_latent_state,
-            latent_state=latent_state,
-            observation_states=current_observation,
-            time=0
-        )
+        latent = self.deterministic_transition_network(prev_latent=prev_latent, latent=latent, obs_states=obs_states, time=0)
 
-        transition_state_random_variable = self.transition_network(
-            previous_latent_state,
-            current_observation
-            )
+        transition_state_rnd_var = self.transition_network(prev_latent, current_obs)
 
-        emission_state_random_variable = self.emission_network(previous_latent_state, latent_state, current_observation)
+        emission_state_rand_var = self.emission_network(prev_latent, latent, curr_obs)
 
-        emission_logpdf = emission_state_random_variable.logpdf(current_observation, batch_size, self.num_particles)
+        emission_logpdf = emission_state_rand_var.logpdf(current_observation, batch_size, self.num_particles)
 
         proposal_logpdf = proposal_state_random_variable.logpdf(latent_state, batch_size, self.num_particles)
         
-        transition_logpdf = transition_state_random_variable.logpdf(latent_state, batch_size, self.num_particles)
+        transition_logpdf = transition_state_rand_var.logpdf(latent_state, batch_size, self.num_particles)
 
-        assert(self.prior_loss_coef == 1)
-        assert(self.obs_loss_coef == 1)
         new_log_weight = transition_logpdf - proposal_logpdf + emission_logpdf
 
         latent_state.log_weight = new_log_weight
@@ -231,10 +230,11 @@ class DVRLPolicy(Policy):
 
         predicted_observations = None
         particle_observations = None
+        
         if predicted_times is not None:
-            predicted_observations, particle_observations = self.predict_observations(
+            pred_obs, particle_obse = self.pred_obs(
                 latent_state=latent_state,
-                current_observation=current_observation,
+                current_obs=current_obs,
                 actions=actions,
                 emission_state_random_variable=emission_state_random_variable,
                 predicted_times=predicted_times)
@@ -245,9 +245,10 @@ class DVRLPolicy(Policy):
             - encoding_logli, \
             (- transition_logpdf + proposal_logpdf, - emission_logpdf),\
             avg_num_killed_particles,\
-            predicted_observations, particle_observations
+            pred_obs, particle_obs
 
-    def predict_observations(self, latent_state, current_observation, actions, emission_state_random_variable, predicted_times):
+
+    def pred_obs(self, latent_state, current_observation, actions, emission_state_random_variable, predicted_times):
         max_distance = max(predicted_times)
         old_log_weight = latent_state.log_weight
         predicted_observations = []
@@ -255,15 +256,13 @@ class DVRLPolicy(Policy):
 
         if 0 in predicted_times:
             x = emission_state_random_variable.all_x._probability
-
-            averaged_obs = stats.empirical_mean(
-                x,
-                old_log_weight)
+            averaged_obs = stats.empirical_mean(x, old_log_weight)
             predicted_observations.append(averaged_obs)
             particle_observations.append(x)
 
-        batch_size, num_particles, z_dim = latent_state.z.size()
-        batch_size, num_particles, h_dim = latent_state.h.size()
+        bs, num_particles, z_dim = latent.z.size()
+        bs, num_particles, h_dim = latent.h.size()
+        
         for dt in range(max_distance):
             old_observation = current_observation
             previous_latent_state = latent_state
@@ -273,52 +272,34 @@ class DVRLPolicy(Policy):
 
             latent_state.phi_z = self.deterministic_transition_network.phi_z(latent_state.z.view(-1, z_dim)).view(batch_size, num_particles, h_dim)
 
-            emission_state_random_variable = self.emission_network(
-                previous_latent_state,
-                latent_state,
-                old_observation
-                )
-            x = emission_state_random_variable.all_x._probability
-            averaged_obs = stats.empirical_mean(
-                x,
-                old_log_weight)
+            emission_state_random_variable = self.emission_network(previous_latent_state, latent_state, old_observation)
+            
+            x = emission_state_rand_var.all_x._prob
+            
+            averaged_obs = stats.empirical_mean(x, old_log_weight)
 
-            current_observation = st.State(
-                all_x=averaged_obs.unsqueeze(0),
-                all_a=actions.contiguous()
-            )
+            current_observation = st.State(all_x=averaged_obs.unsqueeze(0), all_a=actions.contiguous())
+            
             current_observation = self.encoding_network(current_observation)
             current_observation.unsequeeze_and_expand_all_(dim=2, size=self.num_particles)
             current_observation = current_observation.index_elements(0)
 
-            latent_state = self.deterministic_transition_network(
-                previous_latent_state=previous_latent_state,
-                latent_state=latent_state,
-                observation_states=current_observation,
-                time=0
-            )
+            latent_state = self.deterministic_transition_network(prev_latent=latent, latent=latent, obs_states=current_obs, time=0)
 
             if dt+1 in predicted_times:
-                predicted_observations.append(averaged_obs)
-                particle_observations.append(x)
+                pred_obs.append(averaged_obs)
+                particle_obs.append(x)
 
-        return predicted_observations, particle_observations
+        return pred_obs, particle_obs
+
 
     def encode_particles(self, latent_state):
         batch_size, num_particles, h_dim = latent_state.h.size()
-        state = torch.cat([latent_state.h,
-                           latent_state.phi_z],
-                          dim=2)
+        state = torch.cat([latent_state.h, latent_state.phi_z], dim=2)
 
-        normalized_log_weights = math.lognormexp(
-            latent_state.log_weight,
-            dim=1
-        )
+        normalized_log_weights = math.lognormexp(latent_state.log_weight, dim=1)
 
-        particle_state = torch.cat(
-            [state,
-             torch.exp(normalized_log_weights).unsqueeze(-1)],
-            dim=2)
+        particle_state = torch.cat([state, torch.exp(normalized_log_weights).unsqueeze(-1)], dim=2)
 
         if self.num_particles == 1:
             particle_state = particle_state.squeeze(1)

@@ -1,4 +1,11 @@
-# From https://github.com/maximilianigl/DVRL/blob/master/code/encoder_decoder.py
+'''
+Deep Variational Reinforcement Learning (2018) - DVRL
+Maximilian Igl, Luisa Zintgraf, Tuan Anh Le, Frank Wood, Shimon Whiteson
+https://arxiv.org/abs/1806.02426
+https://github.com/maximilianigl/DVRL/blob/master/code/policy.py
+'''
+
+
 
 import torch.nn as nn
 

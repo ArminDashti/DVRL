@@ -1,3 +1,11 @@
+'''
+Deep Variational Reinforcement Learning (2018) - DVRL
+Maximilian Igl, Luisa Zintgraf, Tuan Anh Le, Frank Wood, Shimon Whiteson
+https://arxiv.org/abs/1806.02426
+https://github.com/maximilianigl/DVRL/blob/master/code/policy.py
+'''
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,9 +16,24 @@ import encoder_decoder
 import namedlist
 from operator import mul
 from functools import reduce
+device = 'cpu'
 
 
-class Policy(nn.Module):
+PolicyReturn = namedlist.namedlist('PolicyReturn', [
+    ('latent_state', None),
+    ('value_estimate', None),
+    ('action', None),
+    ('action_log_probs', None),
+    ('dist_entropy', None),
+    ('total_encoding_loss', None),
+    ('encoding_losses', None),
+    ('num_killed_particles', None),
+    ('predicted_obs_img', None),
+    ('particle_obs_img', None),
+])
+
+
+class policy(nn.Module):
     def __init__(self, action_space, encoding_dimension):
         super().__init__()
 
@@ -28,25 +51,22 @@ class Policy(nn.Module):
         self.encoding_bn = nn.BatchNorm1d(encoding_dimension)
 
 
-    def forward(self, current_memory, deterministic=False, predicted_times=None):
+    def forward(self, current_memory, deterministic=False, pred_times=None):
         policy_return = PolicyReturn()
 
-        device = next(self.parameters()).device
-
-        latent_state, total_encoding_loss, encoding_losses, n_killed_p,\
-            img, p_img = self.encode(
-                observation=current_memory['current_obs'].to(device),
-                reward=current_memory['rewards'].to(device),
-                actions=current_memory['oneHotActions'].to(device).detach(),
-                previous_latent_state=current_memory['states'].to(device),
-                predicted_times=predicted_times,
-            )
+        latent_state, total_encoding_loss, encoding_losses, n_killed_p, img, p_img = self.encode(
+            observation=current_memory['current_obs'].to(device),
+            reward=current_memory['rewards'].to(device),
+            actions=current_memory['oneHotActions'].to(device).detach(),
+            previous_latent_state=current_memory['states'].to(device),
+            predicted_times=predicted_times)
 
         latent_state_for_encoding = latent_state.detach() if self.detach_encoder else latent_state
 
-        encoded_state = (self.encode_particles(latent_state_for_encoding)
-                         if type(self).__name__ == 'DVRLPolicy'
-                         else latent_state_for_encoding)
+        if type(self).__name__ == 'DVRLPolicy':
+            encoded_state = self.encode_particles(latent_state_for_encoding)
+        else:
+            latent_state_for_encoding)
 
         if self.policy_batch_norm:
             encoded_state = self.encoding_bn(encoded_state)
