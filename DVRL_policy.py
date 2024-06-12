@@ -206,19 +206,19 @@ class DVRL_policy(policy):
         curr_obs = obs_states.index_elements(0)
         
         # Take prev latent and obs and calcualte dist, mean, std with 3 indivisual networks then feed rv.MultivariateIndependentNormal(mean=enc_mean_t, variance=enc_std_t) to rv.StateRandomVariable(z=z)
-        proposal_state_rand_var = self.proposal_network(prev_latent=prev_latent, obs_states=current_obs, time=0) 
+        proposal_state_rand_var = self.proposal_network(prev_latent=prev_latent, obs_states=curr_obs, time=0) 
 
         latent = self.sample_from(proposal_state_rand_var)
 
         latent = self.deterministic_transition_network(prev_latent=prev_latent, latent=latent, obs_states=obs_states, time=0)
 
-        transition_state_rnd_var = self.transition_network(prev_latent, current_obs)
+        transition_state_rand_var = self.transition_network(prev_latent, curr_obs)
 
         emission_state_rand_var = self.emission_network(prev_latent, latent, curr_obs)
 
-        emission_logpdf = emission_state_rand_var.logpdf(current_observation, batch_size, self.num_particles)
+        emission_logpdf = emission_state_rand_var.logpdf(curr_obs, bs, self.num_particles)
 
-        proposal_logpdf = proposal_state_random_variable.logpdf(latent_state, batch_size, self.num_particles)
+        proposal_logpdf = proposal_state_rand_var.logpdf(latent_state, batch_size, self.num_particles)
         
         transition_logpdf = transition_state_rand_var.logpdf(latent_state, batch_size, self.num_particles)
 
@@ -228,11 +228,11 @@ class DVRL_policy(policy):
 
         encoding_logli = math.logsumexp(new_log_weight, dim=1) - np.log(self.num_particles)
 
-        predicted_observations = None
-        particle_observations = None
+        pred_obs = None
+        particle_obs = None
         
         if predicted_times is not None:
-            pred_obs, particle_obse = self.pred_obs(
+            pred_obs, particle_obs = self.pred_obs(
                 latent_state=latent_state,
                 current_obs=current_obs,
                 actions=actions,

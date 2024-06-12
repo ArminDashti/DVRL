@@ -163,12 +163,10 @@ class emission(nn.Module):
     def forward(self, prev_latent, latent, obs_states):
         bs, num_particles, phi_z_dim = latent.phi_z.size()
         bs, num_particles, h_dim = prev_latent.h.size()
+        x = torch.cat([latent.phi_z, prev_latent.h, obs_states.encoded_action], 2)
+        x = x.view(-1, phi_z_dim + h_dim + self.action_encoding)
 
-        dec_t = self.linear_obs_decoder(torch.cat([
-            latent.phi_z,
-            prev_latent.h,
-            obs_states.encoded_action
-        ], 2).view(-1, phi_z_dim + h_dim + self.action_encoding))
+        dec_t = self.linear_obs_decoder(x)
 
         dec_t = self.dec(dec_t.view(-1, *self.cnn_output_dimension))
 

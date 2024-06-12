@@ -13,13 +13,15 @@ import sys
 import os
 
 from armin_pytorch.device import detect_device
-from armin_utils.os import find_dir
+from armin_utils.os import current_file_dir
 
-# from DVRL.DVRL_policy import DVRL_policy
-# from DVRL.storage import RolloutStorage
+from DVRL.DVRL_policy import DVRL_policy
+from DVRL.storage import RolloutStorage
 
 device = detect_device()
 
+num_processes = 16
+num_steps = 5
 
 action_space = envs.action_space
 nr_inputs = envs.observation_space.shape[0]
@@ -28,9 +30,12 @@ actor_critic = DVRLPolicy(action_space, nr_inputs, **model_params)
 
 obs_shape = None
 
-rollouts = RolloutStorage(rl_setting['num_steps'], rl_setting['num_processes'], obs_shape, envs.action_space)
+rollouts = RolloutStorage(num_steps=num_steps5, 
+                          num_processes=num_processes, 
+                          obs_shape=obs_shape, 
+                          action_space=envs.action_space)
     
-current_obs = torch.zeros(rl_setting['num_processes'], *obs_shape)
+current_obs = torch.zeros(num_processes, *obs_shape)
     
 obs = env.reset()
     
